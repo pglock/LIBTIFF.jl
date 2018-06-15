@@ -10,7 +10,7 @@ export
     # types
     TIFFFile,
     # functions
-    tiffopen, tiffclose, tiffsize, tiffread
+    tiffopen, tiffclose, tiffsize, tiffread, tiffwrite
 
 type_map = Dict(
     (1, 8) => UInt8,
@@ -63,6 +63,12 @@ end
 
 function tiffgetfield!(value, tag, file::TIFFFile)
     err = ccall((:TIFFGetField, "libtiff"), Cint, (Ptr{Void}, Clong, Ptr{Void}), file.filehandle, tag, value)
+    return err
+end
+
+function tiffsetfield(value, tag, file::TIFFFile, ::Type{T}) where {T}
+    v = convert(T, value)
+    err = ccall((:TIFFSetField, "libtiff"), Cint, (Ptr{Void}, Clong, T), file.filehandle, tag, v)
     return err
 end
 
@@ -272,6 +278,48 @@ function tiffread(file::TIFFFile{Scanline})
         data = Array{TYPE}(size(file)...)
         read_scanline!(data, file)
         return data
+    end
+end
+
+# writing
+
+function defaultstripsize(columns, file)
+    stripsize = ccall((:TIFFDefaultStripSize, "libtiff"), Cint, (Ptr{Void}, Cint), file.filehandle, columns)
+    return stripsize
+end
+
+sampleformat(::Type(Unsigned)) = 1
+sampleformat(::Type(Integer)) = 2
+sampleformat(::Type(AbstractFloat)) = 3
+sampleformat(x) = 4
+
+function tiffwrite(file::TIFFFile, data; compression=1, planarconfig=1, photometric=1)
+    tiffsetfield(1, 274, file, Int16) # image orientation
+    tiffsetfield(1, 277, file, Int16) # samples_per_pixel
+    bitspersample = length(bits(one(eltype(data))))
+    tiffsetfield(bitspersample, 258, file, Int16) # bits per sample
+    tiffsetfield(size(data, 2), 256, file, Int64) # image width
+    tiffsetfield(size(data, 1), 257, file, Int64) # image length
+    sf = sampleformat(one(eltype(data)))
+    tiffsetfield(sf, 339, file, Int16) # sample format
+    tiffsetfield(compression, 259, file, Int16) # compression
+    tiffsetfield(photometric, 262, file, Int16) # photometric
+    tiffsetfield(planarconfig, 284, file, Int16) # planar config
+
+    stripsize = defaultstripsize(size(data, 2), file)
+    tiffsetfield(stripsize, 278, file, Int64)
+    # write scanline
+    for i=1:size(data, 1)
+        row = data[i, :]
+        ccall((:TIFFWriteScanline, "libtiff"), Cint, (Ptr{Void}, Ptr{Void}, Cuint, Cushort), file.filehandle, row, i-1, 0)
+    end
+    ccall((:TIFFWriteDirectory, "libtiff"), Cint, (Ptr{Void},), file.filehandle)
+    return
+end
+
+function tiffwrite(filename::String, data)
+    tiffopen(filename, "w") do file
+        tiffwrite(file, data)
     end
 end
 
